@@ -119,17 +119,17 @@ class CLINT extends Module {
     io.csr_bundle.mstatus_write_data :=
       Cat(
         io.csr_bundle.mstatus(31, 13),
-        3.U(2.W), // mpp ← 0b11 (Machine mode)
+        3.U(2.W),   // [12:11] mpp ← 0b11 (Machine mode) (鎖定在 Machine Mode)
         io.csr_bundle.mstatus(10, 8),
-        mie, // mpie ← mie (save current interrupt enable)
+        mie,        // [7] mpie ← mie (save current interrupt enable (把舊的 MIE 搬到 MPIE)
         io.csr_bundle.mstatus(6, 4),
-        0.U(1.W), // mie ← 0 (disable interrupts)
+        0.U(1.W),   // [3] mie ← 0 (disable interrupts) (mie 強制填 0)
         io.csr_bundle.mstatus(2, 0)
       )
     io.csr_bundle.mepc_write_data := instruction_address
     io.csr_bundle.mcause_write_data :=
       Cat(
-        1.U,
+        1.U,  // interrupt bit
         MuxLookup(
           io.interrupt_flag,
           11.U(31.W) // machine external interrupt
@@ -155,7 +155,7 @@ class CLINT extends Module {
       )
     io.csr_bundle.mepc_write_data := instruction_address
     io.csr_bundle.mcause_write_data := Cat(
-      0.U,
+      0.U,  // exception bit
       MuxLookup(io.instruction, 0.U)(
         IndexedSeq(
           InstructionsEnv.ebreak -> 3.U(31.W),
@@ -194,11 +194,11 @@ class CLINT extends Module {
     io.csr_bundle.mstatus_write_data :=
       Cat(
         io.csr_bundle.mstatus(31, 13),
-        3.U(2.W), // mpp ← 0b11 (Machine mode)
+        3.U(2.W), // [12:11] mpp ← 0b11 (Machine mode) [12:11]
         io.csr_bundle.mstatus(10, 8),
-        1.U(1.W), // mpie ← 1 (reset MPIE)
+        1.U(1.W), // [7] mpie ← 1 (reset MPIE) (MRET 後設為 1)
         io.csr_bundle.mstatus(6, 4),
-        mpie, // mie ← mpie (restore interrupt enable)
+        mpie,     // [3] mie ← mpie (restore interrupt enable) (把備份的值搬回 MIE)
         io.csr_bundle.mstatus(2, 0)
       )
     io.csr_bundle.mepc_write_data     := io.csr_bundle.mepc

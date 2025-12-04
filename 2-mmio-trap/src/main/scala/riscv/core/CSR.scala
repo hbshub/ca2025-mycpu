@@ -90,16 +90,16 @@ object CSRRegister {
  */
 class CSR extends Module {
   val io = IO(new Bundle {
-    val reg_read_address_id    = Input(UInt(Parameters.CSRRegisterAddrWidth))
-    val reg_write_enable_id    = Input(Bool())
-    val reg_write_address_id   = Input(UInt(Parameters.CSRRegisterAddrWidth))
-    val reg_write_data_ex      = Input(UInt(Parameters.DataWidth))
+    val reg_read_address_id    = Input(UInt(Parameters.CSRRegisterAddrWidth)) // CPU 說：我要讀這個地址
+    val reg_write_enable_id    = Input(Bool())                                // CPU 說：我要寫入！
+    val reg_write_address_id   = Input(UInt(Parameters.CSRRegisterAddrWidth)) // CPU 說：寫到這個地址
+    val reg_write_data_ex      = Input(UInt(Parameters.DataWidth))            // CPU 說：要把這個值寫進去
     val debug_reg_read_address = Input(UInt(Parameters.CSRRegisterAddrWidth))
 
     val debug_reg_read_data = Output(UInt(Parameters.DataWidth))
-    val reg_read_data       = Output(UInt(Parameters.DataWidth))
+    val reg_read_data       = Output(UInt(Parameters.DataWidth))              // 這裡吐出 CPU 要讀的資料
 
-    val clint_access_bundle = Flipped(new CSRDirectAccessBundle)
+    val clint_access_bundle = Flipped(new CSRDirectAccessBundle)              // (CLINT) 的專屬通道
   })
 
   val mstatus  = RegInit(UInt(Parameters.DataWidth), 0.U)
@@ -126,22 +126,23 @@ class CSR extends Module {
   val regLUT =
     IndexedSeq(
       // TODO: Complete CSR address to register mapping
-      CSRRegister.MSTATUS  -> ?,
-      CSRRegister.MIE      -> ?,
-      CSRRegister.MTVEC    -> ?,
-      CSRRegister.MSCRATCH -> ?,
-      CSRRegister.MEPC     -> ?,
-      CSRRegister.MCAUSE   -> ?,
+      CSRRegister.MSTATUS  -> mstatus,
+      CSRRegister.MIE      -> mie,
+      CSRRegister.MTVEC    -> mtvec,
+      CSRRegister.MSCRATCH -> mscratch,
+      CSRRegister.MEPC     -> mepc,
+      CSRRegister.MCAUSE   -> mcause,
 
       // 64-bit cycle counter split into high and low 32 bits
       // TODO: Extract low 32 bits and high 32 bits from cycles
-      CSRRegister.CycleL   -> ?,
-      CSRRegister.CycleH   -> ?,
+      CSRRegister.CycleL   -> cycles(31, 0),
+      CSRRegister.CycleH   -> cycles(63, 32),
     )
   cycles := cycles + 1.U
 
   // If the pipeline and the CLINT are going to write the CSR at the same time, CLINT writes take priority.
   // Interrupt entry (CLINT) must override normal CSR writes to properly handle traps.
+  // CPU 給我一個 CSR 地址，我馬上查表 (regLUT)，如果有這個地址，我就把對應暫存器的值傳出去；如果沒有，我就傳 0。
   io.reg_read_data       := MuxLookup(io.reg_read_address_id, 0.U)(regLUT)
   io.debug_reg_read_data := MuxLookup(io.debug_reg_read_address, 0.U)(regLUT)
 
@@ -165,21 +166,25 @@ class CSR extends Module {
   // - mstatus: Save/restore interrupt enable state
   // - mepc: Save exception return address
   // - mcause: Record trap cause
+  // 邏輯：處理硬體中斷與軟體指令之間的寫入優先級。
+  // 規則：CLINT (硬體) 的寫入優先於 CPU (軟體)，以確保陷阱狀態能被原子性地更新。
   when(io.clint_access_bundle.direct_write_enable) {
     // Atomic update when CLINT triggers interrupt
     // TODO: Which CSRs does CLINT need to write?
-    ? := io.clint_access_bundle.mstatus_write_data
-    ? := io.clint_access_bundle.mepc_write_data
-    ? := io.clint_access_bundle.mcause_write_data
+    // 情況 1：硬體中斷 (CLINT)。CLINT 在進入 Trap 時自動更新這些暫存器。
+    mstatus := io.clint_access_bundle.mstatus_write_data
+    mepc := io.clint_access_bundle.mepc_write_data
+    mcause := io.clint_access_bundle.mcause_write_data
   }.elsewhen(io.reg_write_enable_id) {
     // CPU CSR instruction write
     // TODO: Update corresponding CSR based on write address
+    // 情況 2：軟體指令 (CPU)。只有在 CLINT 沒有寫入時，CPU 才能更新。
     when(io.reg_write_address_id === CSRRegister.MSTATUS) {
-      mstatus := ?
+      mstatus := io.reg_write_data_ex
     }.elsewhen(io.reg_write_address_id === CSRRegister.MEPC) {
-      ? := io.reg_write_data_ex
+      mepc := io.reg_write_data_ex
     }.elsewhen(io.reg_write_address_id === CSRRegister.MCAUSE) {
-      ? := io.reg_write_data_ex
+      mcause := io.reg_write_data_ex
     }
   }
 
@@ -187,14 +192,16 @@ class CSR extends Module {
   // - mie: Machine interrupt enable bits
   // - mtvec: Machine trap vector base address
   // - mscratch: Machine scratch register for trap handlers
+  // 邏輯：這些暫存器完全由軟體指令控制。
+  //       CLINT 硬體永遠不會修改它們，因此不需要優先級檢查。
   when(io.reg_write_enable_id) {
     // TODO: Complete write logic for these CSRs
     when(io.reg_write_address_id === CSRRegister.MIE) {
-      ? := io.reg_write_data_ex
+      mie := io.reg_write_data_ex
     }.elsewhen(io.reg_write_address_id === CSRRegister.MTVEC) {
-      ? := io.reg_write_data_ex
+      mtvec := io.reg_write_data_ex
     }.elsewhen(io.reg_write_address_id === CSRRegister.MSCRATCH) {
-      ? := io.reg_write_data_ex
+      mscratch := io.reg_write_data_ex
     }
   }
 
