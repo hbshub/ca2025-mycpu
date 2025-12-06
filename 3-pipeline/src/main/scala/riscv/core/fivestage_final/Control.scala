@@ -54,13 +54,13 @@ import riscv.Parameters
 class Control extends Module {
   val io = IO(new Bundle {
     val jump_flag              = Input(Bool())                                     // id.io.if_jump_flag
-    val jump_instruction_id    = Input(Bool())                                     // id.io.ctrl_jump_instruction           //
+    val jump_instruction_id    = Input(Bool())                                     // id.io.ctrl_jump_instruction (Is it a Jump Instruction at ID stage)
     val rs1_id                 = Input(UInt(Parameters.PhysicalRegisterAddrWidth)) // id.io.regs_reg1_read_address
     val rs2_id                 = Input(UInt(Parameters.PhysicalRegisterAddrWidth)) // id.io.regs_reg2_read_address
-    val memory_read_enable_ex  = Input(Bool())                                     // id2ex.io.output_memory_read_enable
+    val memory_read_enable_ex  = Input(Bool())                                     // id2ex.io.output_memory_read_enable (Is it a Load Instruction at EX stage)
     val rd_ex                  = Input(UInt(Parameters.PhysicalRegisterAddrWidth)) // id2ex.io.output_regs_write_address
-    val memory_read_enable_mem = Input(Bool())                                     // ex2mem.io.output_memory_read_enable   //
-    val rd_mem                 = Input(UInt(Parameters.PhysicalRegisterAddrWidth)) // ex2mem.io.output_regs_write_address   //
+    val memory_read_enable_mem = Input(Bool())                                     // ex2mem.io.output_memory_read_enable (Is it a Load Instruction at MEM stage)
+    val rd_mem                 = Input(UInt(Parameters.PhysicalRegisterAddrWidth)) // ex2mem.io.output_regs_write_address
 
     val if_flush = Output(Bool())
     val id_flush = Output(Bool())
@@ -104,11 +104,11 @@ class Control extends Module {
     // 3. AND destination register is not x0
     // 4. AND destination register conflicts with ID source registers
     //
-    ((?) && // Either:
+    ((io.jump_instruction_id || io.memory_read_enable_ex) && // Either:
       // - Jump in ID needs register value, OR
       // - Load in EX (load-use hazard)
-      ? =/= 0.U &&                                 // Destination is not x0
-      (?)) // Destination matches ID source
+      io.rd_ex =/= 0.U &&                                 // Destination is not x0
+      ((io.rd_ex === io.rs1_id) || (io.rd_ex === io.rs2_id))) // Destination matches ID source
     //
     // Examples triggering Condition 1:
     // a) Jump dependency: ADD x1, x2, x3 [EX]; JALR x0, x1, 0 [ID] → stall
@@ -125,10 +125,10 @@ class Control extends Module {
         // 3. Destination register is not x0
         // 4. Destination register conflicts with ID source registers
         //
-        (? &&                              // Jump instruction in ID
-          ? &&                          // Load instruction in MEM
-          ? =/= 0.U &&                                  // Load destination not x0
-          (?)) // Load dest matches jump source
+        (io.jump_instruction_id &&                              // Jump instruction in ID
+          io.memory_read_enable_mem &&                          // Load instruction in MEM
+          io.rd_mem =/= 0.U &&                                  // Load destination not x0
+          ((io.rd_mem === io.rs1_id) || (io.rd_mem === io.rs2_id))) // Load dest matches jump source
         //
         // Example triggering Condition 2:
         // LW x1, 0(x2) [MEM]; NOP [EX]; JALR x0, x1, 0 [ID]
@@ -140,9 +140,9 @@ class Control extends Module {
     // - Flush ID/EX register (insert bubble)
     // - Freeze PC (don't fetch next instruction)
     // - Freeze IF/ID (hold current fetch result)
-    io.id_flush := ?
-    io.pc_stall := ?
-    io.if_stall := ?
+    io.id_flush := true.B
+    io.pc_stall := true.B
+    io.if_stall := true.B
 
   }.elsewhen(io.jump_flag) {
     // ============ Control Hazard (Branch Taken) ============
@@ -150,7 +150,7 @@ class Control extends Module {
     // Only flush IF stage (not ID) since branch resolved early
     // TODO: Which stage needs to be flushed when branch is taken?
     // Hint: Branch resolved in ID stage, discard wrong-path instruction
-    io.if_flush := ?
+    io.if_flush := true.B
     // Note: No ID flush needed - branch already resolved in ID!
     // This is the key optimization: 1-cycle branch penalty vs 2-cycle
   }
@@ -164,29 +164,46 @@ class Control extends Module {
   // Q1: Why do we need to stall for load-use hazards?
   // A: [Student answer here]
   // Hint: Consider data dependency and forwarding limitations
-  //
+  // Data dependency : 
+  // 因為 load 指令的資料要到 MEM 階段才能取得，若下一個指令需要使用該資料，則必須等待，否則會讀取到錯誤的值。
+  // Forwarding limitations : 
+  // 雖然有 forwarding 機制，但 load 指令的資料在 EX 階段尚未可用，無法進行 forwarding，因此需要 stall。
+  // 
   // Q2: What is the difference between "stall" and "flush" operations?
   // A: [Student answer here]
   // Hint: Compare their effects on pipeline registers and PC
-  //
+  // Stall :
+  // Stall 是暫停指令的執行，保持目前的指令在 pipeline 中不變，凍結 PC 和 pipeline register (IF/ID). 目的是等待資料準備好
+  // Flush :
+  // Flush 是清除 pipeline 中的指令，通常是將 pipeline register 設為 NOP，以丟棄錯誤路徑的指令，並設定 PC 到正確的地址。 目的是丟棄抓錯的指令
+  // 
   // Q3: Why does jump instruction with register dependency need stall?
   // A: [Student answer here]
   // Hint: When is jump target address available?
-  //
+  // Jump resolves the target address in the ID stage.
+  // In EX stage, forwarding the result back to ID for address calculation creates a critical path that is too long for one cycle.
+  // In MEM stage, the data cannot be forwarded to ID stage, so we need to stall.
+  // 
   // Q4: In this design, why is branch penalty only 1 cycle instead of 2?
   // A: [Student answer here]
   // Hint: Compare ID-stage vs EX-stage branch resolution
-  //
+  // 如果再 ID 階段決定的話，可以直接在下一個週期更新 PC，僅需 flush IF 階段的指令，因此只有 1 個週期的罰則。
+  // 如果再 EX 階段決定的話，則需要等待兩個週期才能更新 PC，並且需要 flush IF 和 ID 階段的指令，因此有 2 個週期的罰則。
+  // 
   // Q5: What would happen if we removed the hazard detection logic entirely?
   // A: [Student answer here]
   // Hint: Consider data hazards and control flow correctness
+  // data hazards :
+  // 如果沒有 hazard detection，當有 data hazard 發生時，後續指令可能會讀取到錯誤的資料，導致計算結果錯誤。
+  // control flow correctness :
+  // 如果沒有 hazard detection，當有 control hazard 發生時，可能會執行錯誤的指令，導致程式流程錯亂。
   //
   // Q6: Complete the stall condition summary:
   // Stall is needed when:
-  // 1. ? (EX stage condition)
-  // 2. ? (MEM stage condition)
+  // 1. EX Hazard: ID instruction depends on Load in EX, or JALR depends on EX stage.
+  // 2. MEM Hazard: JALR depends on Load in MEM stage.
   //
   // Flush is needed when:
-  // 1. ? (Branch/Jump condition)
+  // 1. Control Hazard: Branch taken or Jump (JAL/JALR) in ID stage. (Branch/Jump condition)
   //
 }
